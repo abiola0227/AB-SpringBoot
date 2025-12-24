@@ -1,0 +1,32 @@
+version: 0.0
+os: linux
+
+files:
+  - source: /
+    destination: /home/ec2-user/app
+
+hooks:
+  ApplicationStop:
+    - location: stop.sh
+      timeout: 60
+      runas: root
+
+  BeforeInstall:
+    - location: pre-install-checks.sh
+      timeout: 30
+      runas: root
+
+  AfterInstall:
+    - location: create-codedeploy-env-vars.sh
+      timeout: 30
+      runas: root
+
+  ApplicationStart:
+    - location: run.sh
+      timeout: 60
+      runas: root
+
+  ValidateService:
+    - location: validate.sh
+      timeout: 120
+      runas: root
