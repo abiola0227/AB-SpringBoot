@@ -1,0 +1,79 @@
+version: 0.2
+
+env:
+  variables:
+    ECR_REPO_NAME: "ab-springboot"
+
+phases:
+  install:
+    runtime-versions:
+      java: corretto17
+    commands:
+      - echo "Installing dependencies..."
+      - chmod +x ./gradlew
+
+  pre_build:
+    commands:
+      - echo "Building Spring Boot JAR..."
+      - ./gradlew clean build -x test
+      - echo "Checking if ECR repository '$ECR_REPO_NAME' exists..."
+      - REPO_EXISTS=$(aws ecr describe-repositories --repository-names $ECR_REPO_NAME --query "repositories[0].repositoryName" 2>/dev/null || true)
+      - |
+          if [ -z "$REPO_EXISTS" ]; then
+            echo "ECR repo not found. Creating..."
+            aws ecr create-repository --repository-name $ECR_REPO_NAME
+          else
+            echo "ECR repo exists. Continuing..."
+          fi
+      - echo "Logging into ECR..."
+      - AWS_ACCOUNT_ID=$(echo $CODEBUILD_BUILD_ARN | cut -f 5 -d ':')
+      - AWS_REGION=$(echo $CODEBUILD_BUILD_ARN | cut -f 4 -d ':')
+      - ECR_REGISTRY_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY_URI
+
+  build:
+    commands:
+      - echo "Building Docker image..."
+      - docker build -t $ECR_REPO_NAME:$CODEBUILD_BUILD_NUMBER .
+      - echo "Tagging Docker image..."
+      - docker tag $ECR_REPO_NAME:$CODEBUILD_BUILD_NUMBER $ECR_REGISTRY_URI/$ECR_REPO_NAME:$CODEBUILD_BUILD_NUMBER
+      - docker tag $ECR_REPO_NAME:$CODEBUILD_BUILD_NUMBER $ECR_REGISTRY_URI/$ECR_REPO_NAME:latest
+
+  post_build:
+    commands:
+      - echo "Running container for testing..."
+      - CONTAINER_ID=$(docker run -d -p 8080:8080 $ECR_REPO_NAME:$CODEBUILD_BUILD_NUMBER)
+      - echo "Container ID: $CONTAINER_ID"
+      - echo "Waiting for Spring Boot to start..."
+      - sleep 10
+      - echo "Testing application endpoint..."
+      - HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+      - |
+          if [ "$HTTP_STATUS" -eq 200 ]; then
+            echo "Spring Boot test passed!"
+          else
+            echo "Spring Boot test FAILED with status $HTTP_STATUS"
+            exit 1
+          fi
+      - echo "Stopping test container..."
+      - docker stop $CONTAINER_ID
+      - docker rm $CONTAINER_ID
+      - echo "Pushing Docker images to ECR..."
+      - docker push $ECR_REGISTRY_URI/$ECR_REPO_NAME:$CODEBUILD_BUILD_NUMBER
+      - docker push $ECR_REGISTRY_URI/$ECR_REPO_NAME:latest
+
+artifacts:
+  files:
+    - build/libs/*.jar
+    - appspec.yml
+    - run.sh
+    - stop.sh
+    - validate.sh
+    - pre-install-checks.sh
+    - create-codedeploy-env-vars.sh
+  name: output-artifact
+
+cache:
+  paths:
+    - "/root/.gradle/caches/**/*"
+    - "/root/.gradle/wrapper/**/*"
